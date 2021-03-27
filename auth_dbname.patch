@@ -1,0 +1,151 @@
+From 6f78a1160ee20f5395029e7553f7d77ba43022d2 Mon Sep 17 00:00:00 2001
+From: Daymel Bonne <daymelbonne@gmail.com>
+Date: Mon, 6 Aug 2018 09:09:24 -0500
+Subject: [PATCH] auth_dbname option for database definitions
+
+Now you can specify an database's entry name for authentication.
+If auth_dbname is set, auth_query is sended to that database.
+This is util were we want use only one database for all users
+authentications, i.e
+
+   p0 = host=127.0.0.1 dbname=pgbench auth_dbname=authdb auth_user=pswcheck
+   authdb = host=127.0.0.1 dbname=pgbouncer
+
+If there isn't an entry named as the value specified in auth_dbname,
+the database specified in dbname will be used instead.
+---
+ .gitignore        |  2 ++
+ include/bouncer.h |  1 +
+ src/client.c      | 20 +++++++++++++++++++-
+ src/janitor.c     |  3 +++
+ src/loader.c      |  9 +++++++++
+ test/test.ini     |  2 +-
+ test/test.sh      |  9 +++++++++
+ 7 files changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/include/bouncer.h b/include/bouncer.h
+index 1fa6ab61..3bb9fdbc 100644
+--- a/include/bouncer.h
++++ b/include/bouncer.h
+@@ -295,6 +295,7 @@ struct PgDatabase {
+ 
+ 	PgUser *forced_user;	/* if not NULL, the user/psw is forced */
+ 	PgUser *auth_user;	/* if not NULL, users not in userlist.txt will be looked up on the server */
++	const char *auth_dbname; /* is the database used for authentication */
+ 
+ 	const char *host;	/* host or unix socket name */
+ 	int port;
+diff --git a/src/client.c b/src/client.c
+index 2a46e0d7..df65ba44 100644
+--- a/src/client.c
++++ b/src/client.c
+@@ -88,9 +88,27 @@ static void start_auth_request(PgSocket *client, const char *username)
+ {
+ 	int res;
+ 	PktBuf *buf;
++	PgDatabase *authdb = client->db;
++
++	if (client->db->auth_dbname != NULL) {
++		authdb = find_database(client->db->auth_dbname);
++		if (authdb == NULL) {
++			authdb = client->db;
++			log_info(
++				"%s database not found, using %s instead",
++				client->db->auth_dbname, client->db->dbname
++			);
++		} else if (authdb->db_disabled) {
++			authdb = client->db;
++			log_info(
++				"database %s does not allow connections, using %s instead",
++				client->db->auth_dbname, client->db->dbname
++			);
++		}
++	}
+ 
+ 	/* have to fetch user info from db */
+-	client->pool = get_pool(client->db, client->db->auth_user);
++	client->pool = get_pool(authdb, client->db->auth_user);
+ 	if (!find_server(client)) {
+ 		client->wait_for_user_conn = true;
+ 		return;
+diff --git a/src/janitor.c b/src/janitor.c
+index 464a6589..e4f0ac06 100644
+--- a/src/janitor.c
++++ b/src/janitor.c
+@@ -697,6 +697,9 @@ void kill_database(PgDatabase *db)
+ 
+ 	pktbuf_free(db->startup_params);
+ 	free(db->host);
++	if(db->auth_dbname) {
++		free(db->auth_dbname);
++	}
+ 
+ 	if (db->forced_user)
+ 		slab_free(user_cache, db->forced_user);
+diff --git a/src/loader.c b/src/loader.c
+index 355bd7b3..4f736a88 100644
+--- a/src/loader.c
++++ b/src/loader.c
+@@ -194,6 +194,7 @@ bool parse_database(void *base, const char *name, const char *connstr)
+ 	char *username = NULL;
+ 	char *password = "";
+ 	char *auth_username = NULL;
++	char *auth_dbname = NULL;
+ 	char *client_encoding = NULL;
+ 	char *datestyle = NULL;
+ 	char *timezone = NULL;
+@@ -236,6 +237,8 @@ bool parse_database(void *base, const char *name, const char *connstr)
+ 			password = val;
+ 		} else if (strcmp("auth_user", key) == 0) {
+ 			auth_username = val;
++		} else if (strcmp("auth_dbname", key) == 0) {
++			auth_dbname = val;
+ 		} else if (strcmp("client_encoding", key) == 0) {
+ 			client_encoding = val;
+ 		} else if (strcmp("datestyle", key) == 0) {
+@@ -378,6 +381,12 @@ bool parse_database(void *base, const char *name, const char *connstr)
+ 		db->auth_user = NULL;
+ 	}
+ 
++	if (db->auth_dbname)
++		free(db->auth_dbname);
++	db->auth_dbname = NULL;
++	if(auth_dbname != NULL)
++		db->auth_dbname = strdup(auth_dbname);
++
+ 	/* if user is forced, create fake object for it */
+ 	if (username != NULL) {
+ 		if (!force_user(db, username, password))
+diff --git a/test/test.ini b/test/test.ini
+index 0045cbd5..2e6fb6da 100644
+--- a/test/test.ini
++++ b/test/test.ini
+@@ -6,7 +6,7 @@ p1 = port=6666 host=127.0.0.1 dbname=p1 user=bouncer
+ p2 = port=6668 host=127.0.0.1 dbname=p2 user=bouncer
+ p3 = port=6666 host=127.0.0.1 dbname=p0 user=bouncer pool_mode=session
+ 
+-authdb = port=6666 host=127.0.0.1 dbname=p1 auth_user=pswcheck
++authdb = port=6666 host=127.0.0.1 dbname=p1 auth_user=pswcheck auth_dbname=p0
+ 
+ ;; Configuation section
+ [pgbouncer]
+diff --git a/test/test.sh b/test/test.sh
+index 8e5537bb..a00de9a1 100755
+--- a/test/test.sh
++++ b/test/test.sh
+@@ -525,6 +525,15 @@ test_auth_user() {
+ 	echo "curuser=$curuser"
+ 	test "$curuser" = "someuser" || return 1
+ 
++	admin "disable p0";
++	admin "set auth_type='md5'"
++	curuser=`psql -X -d "dbname=authdb user=someuser password=anypasswd" -tAq -c "select current_user;"`
++	grep "database p0 does not allow connections, using p1 instead" $BOUNCER_LOG
++	test $? || return 1
++ 	admin "show databases"
++	admin "show pools"
++	admin "enable p0";
++
+ 	curuser2=`psql -X -d "dbname=authdb user=nouser password=anypasswd" -tAq -c "select current_user;"`
+ 	echo "curuser2=$curuser2"
+ 	test "$curuser2" = "" || return 1
