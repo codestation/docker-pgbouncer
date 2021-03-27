@@ -49,6 +49,8 @@ RUN apk --no-cache add \
         ca-certificates \
         c-ares
 
+RUN addgroup -g 70 -S postgres && adduser -u 70 -S postgres -G postgres -h /var/lib/postgresql -s /bin/sh -g "Postgres user"
+
 WORKDIR /etc/pgbouncer
 WORKDIR /var/log/pgbouncer
 
