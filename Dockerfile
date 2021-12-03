@@ -1,6 +1,6 @@
-FROM alpine:3.13
+FROM alpine:3.15
 
-FROM alpine:3.13 AS build_stage
+FROM alpine:3.15 AS build_stage
 
 LABEL maintainer "codestation404@gmail.com"
 
@@ -17,12 +17,12 @@ RUN apk --no-cache add \
         libevent-dev \
         libtool \
         make \
-        libressl-dev \
+        openssl-dev \
         file \
         patch \
         pkgconf
 
-ARG PGBOUNCER_VERSION=1.15.0
+ARG PGBOUNCER_VERSION=1.16.1
 
 RUN curl -Lso  "/tmp/pgbouncer.tar.gz" "https://pgbouncer.github.io/downloads/files/${PGBOUNCER_VERSION}/pgbouncer-${PGBOUNCER_VERSION}.tar.gz" && \
         file "/tmp/pgbouncer.tar.gz"
@@ -41,11 +41,11 @@ RUN patch -p1 < auth_dbname.patch
 RUN ./configure --prefix=/usr && \
         make
 
-FROM alpine:3.13
+FROM alpine:3.15
 
 RUN apk --no-cache add \
         libevent \
-        libressl \
+        openssl \
         ca-certificates \
         c-ares
 
