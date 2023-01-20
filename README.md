@@ -1,6 +1,6 @@
 ### PgBouncer Docker image
 
-This image is patched with https://github.com/pgbouncer/pgbouncer/pull/315
+This image is patched with https://github.com/pgbouncer/pgbouncer/pull/764
 
 Check for more info: https://www.2ndquadrant.com/en/blog/pg-phriday-securing-pgbouncer/
 

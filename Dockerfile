@@ -1,8 +1,5 @@
-FROM alpine:3.15
-
-FROM alpine:3.15 AS build_stage
-
-LABEL maintainer "codestation404@gmail.com"
+FROM alpine:3.17 AS build_stage
+LABEL maintainer="Codestation <codestation@megpoid.dev>"
 
 RUN apk --no-cache add \
         autoconf \
@@ -22,7 +19,7 @@ RUN apk --no-cache add \
         patch \
         pkgconf
 
-ARG PGBOUNCER_VERSION=1.16.1
+ARG PGBOUNCER_VERSION=1.18.0
 
 RUN curl -Lso  "/tmp/pgbouncer.tar.gz" "https://pgbouncer.github.io/downloads/files/${PGBOUNCER_VERSION}/pgbouncer-${PGBOUNCER_VERSION}.tar.gz" && \
         file "/tmp/pgbouncer.tar.gz"
@@ -41,7 +38,7 @@ RUN patch -p1 < auth_dbname.patch
 RUN ./configure --prefix=/usr && \
         make
 
-FROM alpine:3.15
+FROM alpine:3.17
 
 RUN apk --no-cache add \
         libevent \

@@ -1,92 +1,227 @@
-From 6f78a1160ee20f5395029e7553f7d77ba43022d2 Mon Sep 17 00:00:00 2001
-From: Daymel Bonne <daymelbonne@gmail.com>
-Date: Mon, 6 Aug 2018 09:09:24 -0500
-Subject: [PATCH] auth_dbname option for database definitions
+From 0ba795f063da121ad7aa3d63699058e85fd3c382 Mon Sep 17 00:00:00 2001
+From: Goksel Simsek <20810681+goksgie@users.noreply.github.com>
+Date: Tue, 3 Jan 2023 19:25:16 +0300
+Subject: [PATCH] Introduce auth_dbname as an option (#764)
 
-Now you can specify an database's entry name for authentication.
-If auth_dbname is set, auth_query is sended to that database.
-This is util were we want use only one database for all users
-authentications, i.e
+This commit implements the auth_dbname option introduced by the
+following PR: https://github.com/pgbouncer/pgbouncer/pull/645
 
-   p0 = host=127.0.0.1 dbname=pgbench auth_dbname=authdb auth_user=pswcheck
-   authdb = host=127.0.0.1 dbname=pgbouncer
+In essence, users should be able to specify authentication database to
+execute auth_query against. This will help them to avoid creating same
+function on every database in their server.
 
-If there isn't an entry named as the value specified in auth_dbname,
-the database specified in dbname will be used instead.
+A user can specify `auth_dbname` in the connection string, or they can
+set it globally. In case `auth_dbname` is specified in connection string
+(under database) it will override the global configuration.
+
+Co-authored-by: Euler Taveira <euler@eulerto.com>
+Co-authored-by: Gabriele Bartolini <gbartolini@users.noreply.github.com>
+Co-authored-by: Leonardo Cecchi <leonardoce@users.noreply.github.com>
 ---
- .gitignore        |  2 ++
- include/bouncer.h |  1 +
- src/client.c      | 20 +++++++++++++++++++-
- src/janitor.c     |  3 +++
- src/loader.c      |  9 +++++++++
- test/test.ini     |  2 +-
- test/test.sh      |  9 +++++++++
- 7 files changed, 44 insertions(+), 2 deletions(-)
+ doc/config.md     |  5 ++++
+ etc/pgbouncer.ini |  6 +++++
+ include/bouncer.h |  2 ++
+ include/client.h  |  2 ++
+ src/client.c      | 42 +++++++++++++++++++++++++++++++++-
+ src/janitor.c     |  4 ++++
+ src/loader.c      | 49 +++++++++++++++++++++++++++++++++++----
+ src/main.c        |  3 +++
+ test/test.ini     |  1 +
+ test/test.sh      | 58 +++++++++++++++++++++++++++++++++++++++++++++++
+ 10 files changed, 167 insertions(+), 5 deletions(-)
 
+diff --git a/doc/config.md b/doc/config.md
+index e6134b0304..6893862484 100644
+--- a/doc/config.md
++++ b/doc/config.md
+@@ -342,6 +342,11 @@ is used, it needs to be installed into each database.
+ 
+ Default: `SELECT usename, passwd FROM pg_shadow WHERE usename=$1`
+ 
++### auth_dbname
++
++Database name in the `[database]` section to be used for authentication purposes. This
++option can be either global or overriden in the connection string if this parameter is
++specified.
+ 
+ ## Log settings
+ 
+diff --git a/etc/pgbouncer.ini b/etc/pgbouncer.ini
+index 4aadcb11a8..e3db9092d2 100644
+--- a/etc/pgbouncer.ini
++++ b/etc/pgbouncer.ini
+@@ -27,6 +27,9 @@
+ ;; auth_user must exist in auth_file
+ ; foodb = auth_user=bar
+ 
++;; run auth_query on a specific database.
++; bardb = auth_dbname=foo
++
+ ;; fallback connect string
+ ;* = host=testserver
+ 
+@@ -122,6 +125,9 @@ auth_file = /etc/pgbouncer/userlist.txt
+ ;; must have 2 columns - username and password hash.
+ ;auth_query = SELECT usename, passwd FROM pg_shadow WHERE usename=$1
+ 
++;; Authentication database that can be set globally to run "auth_query".
++;auth_dbname =
++
+ ;;;
+ ;;; Users allowed into database 'pgbouncer'
+ ;;;
 diff --git a/include/bouncer.h b/include/bouncer.h
-index 1fa6ab61..3bb9fdbc 100644
+index 42b5bf2938..a36c0636e1 100644
 --- a/include/bouncer.h
 +++ b/include/bouncer.h
-@@ -295,6 +295,7 @@ struct PgDatabase {
+@@ -454,6 +454,7 @@ struct PgDatabase {
  
+ 	struct PktBuf *startup_params; /* partial StartupMessage (without user) be sent to server */
+ 	const char *dbname;	/* server-side name, pointer to inside startup_msg */
++	char *auth_dbname;	/* if not NULL, auth_query will be run on the specified database */
  	PgUser *forced_user;	/* if not NULL, the user/psw is forced */
  	PgUser *auth_user;	/* if not NULL, users not in userlist.txt will be looked up on the server */
-+	const char *auth_dbname; /* is the database used for authentication */
  
- 	const char *host;	/* host or unix socket name */
- 	int port;
+@@ -617,6 +618,7 @@ extern char *cf_auth_file;
+ extern char *cf_auth_query;
+ extern char *cf_auth_user;
+ extern char *cf_auth_hba_file;
++extern char *cf_auth_dbname;
+ 
+ extern char *cf_pidfile;
+ 
+diff --git a/include/client.h b/include/client.h
+index 33021b6784..136f4b1956 100644
+--- a/include/client.h
++++ b/include/client.h
+@@ -19,3 +19,5 @@
+ bool client_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *pkt)  _MUSTCHECK;
+ bool set_pool(PgSocket *client, const char *dbname, const char *username, const char *password, bool takeover) _MUSTCHECK;
+ bool handle_auth_query_response(PgSocket *client, PktHdr *pkt);
++
++PgDatabase *prepare_auth_database(PgSocket *client) _MUSTCHECK;
 diff --git a/src/client.c b/src/client.c
-index 2a46e0d7..df65ba44 100644
+index 67434be789..464d78da58 100644
 --- a/src/client.c
 +++ b/src/client.c
-@@ -88,9 +88,27 @@ static void start_auth_request(PgSocket *client, const char *username)
- {
- 	int res;
- 	PktBuf *buf;
-+	PgDatabase *authdb = client->db;
+@@ -35,6 +35,42 @@ static const char *hdr2hex(const struct MBuf *data, char *buf, unsigned buflen)
+ 	return bin2hex(bin, dlen, buf, buflen);
+ }
+ 
++/*
++ * Get authentication database for the current client. The order of preference is:
++ *   client->db->auth_dbname: per client authentication database
++ *   cf_auth_dbname: global authentication database
++ *   client->db: client database
++ *
++ * NOTE: if the authentication database is not found or it is disabled, client
++ * will be disconnected.
++ */
++PgDatabase *prepare_auth_database(PgSocket *client)
++{
++	PgDatabase *auth_db = NULL;
++	const char *auth_dbname = client->db->auth_dbname ? client->db->auth_dbname : cf_auth_dbname;
 +
-+	if (client->db->auth_dbname != NULL) {
-+		authdb = find_database(client->db->auth_dbname);
-+		if (authdb == NULL) {
-+			authdb = client->db;
-+			log_info(
-+				"%s database not found, using %s instead",
-+				client->db->auth_dbname, client->db->dbname
-+			);
-+		} else if (authdb->db_disabled) {
-+			authdb = client->db;
-+			log_info(
-+				"database %s does not allow connections, using %s instead",
-+				client->db->auth_dbname, client->db->dbname
-+			);
-+		}
++	if (!auth_dbname)
++		return client->db;
++
++	auth_db = find_database(auth_dbname);
++	if (!auth_db) {
++		slog_error(client, "authentication database \"%s\" is not configured.", auth_dbname);
++		disconnect_client(client, true, "bouncer config error");
++		return NULL;
 +	}
++
++	if (auth_db->db_disabled) {
++		disconnect_client(
++			client,
++			true,
++			"authentication database \"%s\" is disabled",
++			auth_dbname);
++		return NULL;
++	}
++
++	return auth_db;
++}
++
+ static bool check_client_passwd(PgSocket *client, const char *passwd)
+ {
+ 	PgUser *user = client->login_user;
+@@ -121,7 +157,11 @@ static void start_auth_query(PgSocket *client, const char *username)
+ 	PktBuf *buf;
  
  	/* have to fetch user info from db */
 -	client->pool = get_pool(client->db, client->db->auth_user);
-+	client->pool = get_pool(authdb, client->db->auth_user);
++	PgDatabase *auth_db = prepare_auth_database(client);
++	if (!auth_db)
++		return;
++
++	client->pool = get_pool(auth_db, client->db->auth_user);
  	if (!find_server(client)) {
  		client->wait_for_user_conn = true;
  		return;
 diff --git a/src/janitor.c b/src/janitor.c
-index 464a6589..e4f0ac06 100644
+index 41c797d740..82221ae0dd 100644
 --- a/src/janitor.c
 +++ b/src/janitor.c
-@@ -697,6 +697,9 @@ void kill_database(PgDatabase *db)
- 
- 	pktbuf_free(db->startup_params);
- 	free(db->host);
-+	if(db->auth_dbname) {
-+		free(db->auth_dbname);
-+	}
- 
- 	if (db->forced_user)
- 		slab_free(user_cache, db->forced_user);
+@@ -729,6 +729,10 @@ void kill_database(PgDatabase *db)
+ 	} else {
+ 		statlist_remove(&database_list, &db->head);
+ 	}
++
++	if (db->auth_dbname)
++		free((void *)db->auth_dbname);
++
+ 	aatree_destroy(&db->user_tree);
+ 	slab_free(db_cache, db);
+ }
 diff --git a/src/loader.c b/src/loader.c
-index 355bd7b3..4f736a88 100644
+index 82a3a05ad8..6ef76c9e94 100644
 --- a/src/loader.c
 +++ b/src/loader.c
-@@ -194,6 +194,7 @@ bool parse_database(void *base, const char *name, const char *connstr)
+@@ -127,6 +127,41 @@ static char * cstr_get_pair(char *p,
+ 	return cstr_skip_ws(p);
+ }
+ 
++/*
++ * Same as strcmp, but handles NULLs. If both sides are NULL, returns "true".
++ */
++static bool strings_equal(const char *str_left, const char *str_right)
++{
++	if (str_left == NULL && str_right == NULL)
++		return true;
++
++	if (str_left == NULL || str_right == NULL)
++		return false;
++
++	return strcmp(str_left, str_right) == 0;
++}
++
++static bool set_auth_dbname(PgDatabase *db, const char *new_auth_dbname)
++{
++	if (strings_equal(db->auth_dbname, new_auth_dbname))
++		return true;
++
++	if (db->auth_dbname)
++		free(db->auth_dbname);
++
++	if (new_auth_dbname) {
++		db->auth_dbname = strdup(new_auth_dbname);
++		if (!db->auth_dbname) {
++			log_error("auth_dbname %s could not be set for database %s, out of memory", new_auth_dbname, db->name);
++			return false;
++		}
++	} else {
++		db->auth_dbname = NULL;
++	}
++
++	return true;
++}
++
+ static bool set_autodb(const char *connstr)
+ {
+ 	char *tmp = strdup(connstr);
+@@ -168,6 +203,7 @@ bool parse_database(void *base, const char *name, const char *connstr)
  	char *username = NULL;
  	char *password = "";
  	char *auth_username = NULL;
@@ -94,7 +229,7 @@ index 355bd7b3..4f736a88 100644
  	char *client_encoding = NULL;
  	char *datestyle = NULL;
  	char *timezone = NULL;
-@@ -236,6 +237,8 @@ bool parse_database(void *base, const char *name, const char *connstr)
+@@ -222,6 +258,8 @@ bool parse_database(void *base, const char *name, const char *connstr)
  			password = val;
  		} else if (strcmp("auth_user", key) == 0) {
  			auth_username = val;
@@ -103,49 +238,151 @@ index 355bd7b3..4f736a88 100644
  		} else if (strcmp("client_encoding", key) == 0) {
  			client_encoding = val;
  		} else if (strcmp("datestyle", key) == 0) {
-@@ -378,6 +381,12 @@ bool parse_database(void *base, const char *name, const char *connstr)
- 		db->auth_user = NULL;
- 	}
+@@ -272,8 +310,7 @@ bool parse_database(void *base, const char *name, const char *connstr)
+ 		bool changed = false;
+ 		if (strcmp(db->dbname, dbname) != 0) {
+ 			changed = true;
+-		} else if (!!host != !!db->host
+-			   || (host && strcmp(host, db->host) != 0)) {
++		} else if (!strings_equal(host, db->host)) {
+ 			changed = true;
+ 		} else if (port != db->port) {
+ 			changed = true;
+@@ -283,8 +320,9 @@ bool parse_database(void *base, const char *name, const char *connstr)
+ 			changed = true;
+ 		} else if (!username && db->forced_user) {
+ 			changed = true;
+-		} else if (!!connect_query != !!db->connect_query
+-			   || (connect_query && strcmp(connect_query, db->connect_query) != 0))	{
++		} else if (!strings_equal(connect_query, db->connect_query)) {
++			changed = true;
++		} else if (!strings_equal(db->auth_dbname, auth_dbname)) {
+ 			changed = true;
+ 		}
+ 		if (changed)
+@@ -302,6 +340,9 @@ bool parse_database(void *base, const char *name, const char *connstr)
+ 	free(db->connect_query);
+ 	db->connect_query = connect_query;
  
-+	if (db->auth_dbname)
-+		free(db->auth_dbname);
-+	db->auth_dbname = NULL;
-+	if(auth_dbname != NULL)
-+		db->auth_dbname = strdup(auth_dbname);
++	if (!set_auth_dbname(db, auth_dbname))
++		goto fail;
 +
- 	/* if user is forced, create fake object for it */
- 	if (username != NULL) {
- 		if (!force_user(db, username, password))
+ 	if (db->startup_params) {
+ 		msg = db->startup_params;
+ 		pktbuf_reset(msg);
+diff --git a/src/main.c b/src/main.c
+index fb76a56c82..a9e29bb534 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -114,6 +114,7 @@ char *cf_auth_file;
+ char *cf_auth_hba_file;
+ char *cf_auth_user;
+ char *cf_auth_query;
++char *cf_auth_dbname;
+ 
+ int cf_max_client_conn;
+ int cf_default_pool_size;
+@@ -228,6 +229,7 @@ const struct CfLookup sslmode_map[] = {
+ static const struct CfKey bouncer_params [] = {
+ CF_ABS("admin_users", CF_STR, cf_admin_users, 0, ""),
+ CF_ABS("application_name_add_host", CF_INT, cf_application_name_add_host, 0, "0"),
++CF_ABS("auth_dbname", CF_STR, cf_auth_dbname, 0, NULL),
+ CF_ABS("auth_file", CF_STR, cf_auth_file, 0, NULL),
+ CF_ABS("auth_hba_file", CF_STR, cf_auth_hba_file, 0, ""),
+ CF_ABS("auth_query", CF_STR, cf_auth_query, 0, "SELECT usename, passwd FROM pg_shadow WHERE usename=$1"),
+@@ -831,6 +833,7 @@ static void cleanup(void)
+ 	xfree(&cf_unix_socket_dir);
+ 	xfree(&cf_unix_socket_group);
+ 	xfree(&cf_auth_file);
++	xfree(&cf_auth_dbname);
+ 	xfree(&cf_auth_hba_file);
+ 	xfree(&cf_auth_query);
+ 	xfree(&cf_auth_user);
 diff --git a/test/test.ini b/test/test.ini
-index 0045cbd5..2e6fb6da 100644
+index 3988ef6edc..822ebe2a1e 100644
 --- a/test/test.ini
 +++ b/test/test.ini
-@@ -6,7 +6,7 @@ p1 = port=6666 host=127.0.0.1 dbname=p1 user=bouncer
- p2 = port=6668 host=127.0.0.1 dbname=p2 user=bouncer
- p3 = port=6666 host=127.0.0.1 dbname=p0 user=bouncer pool_mode=session
+@@ -25,6 +25,7 @@ p7b= port=6666 host=127.0.0.1 dbname=p7
+ p7c= port=6666 host=127.0.0.1 dbname=p7
+ p8 = port=6666 host=127.0.0.1 dbname=p0 connect_query='set enable_seqscan=off; set enable_nestloop=off'
  
--authdb = port=6666 host=127.0.0.1 dbname=p1 auth_user=pswcheck
-+authdb = port=6666 host=127.0.0.1 dbname=p1 auth_user=pswcheck auth_dbname=p0
++pauthz = port=6666 host=127.0.0.1 dbname=p7 auth_user=pswcheck auth_dbname=authdb
+ authdb = port=6666 host=127.0.0.1 dbname=p1 auth_user=pswcheck
  
- ;; Configuation section
- [pgbouncer]
+ hostlist1 = port=6666 host=127.0.0.1,::1 dbname=p0 user=bouncer
 diff --git a/test/test.sh b/test/test.sh
-index 8e5537bb..a00de9a1 100755
+index 42e29ec366..989fac20da 100755
 --- a/test/test.sh
 +++ b/test/test.sh
-@@ -525,6 +525,15 @@ test_auth_user() {
- 	echo "curuser=$curuser"
- 	test "$curuser" = "someuser" || return 1
+@@ -948,6 +948,63 @@ test_auth_user() {
+ 	return 0
+ }
  
-+	admin "disable p0";
-+	admin "set auth_type='md5'"
-+	curuser=`psql -X -d "dbname=authdb user=someuser password=anypasswd" -tAq -c "select current_user;"`
-+	grep "database p0 does not allow connections, using p1 instead" $BOUNCER_LOG
-+	test $? || return 1
-+ 	admin "show databases"
-+	admin "show pools"
-+	admin "enable p0";
++# tests auth_dbname whether it can be set and honored correctly.
++test_auth_dbname() {
++	$have_getpeereid || return 77
++	local result
 +
- 	curuser2=`psql -X -d "dbname=authdb user=nouser password=anypasswd" -tAq -c "select current_user;"`
- 	echo "curuser2=$curuser2"
- 	test "$curuser2" = "" || return 1
++	admin "set auth_type='md5'"
++
++	# tests the case when auth_dbname is not configured globally or for the target database.
++	curuser=`psql -X -d "dbname=authdb user=someuser password=anypasswd" -tAq -c "select current_user;"`
++	echo "empty auth_dbname test, curuser=$curuser"
++	test "$curuser" = "someuser" || return 1
++
++	# test if invalid globally set auth_dbname results in
++	# client disconnection.
++	admin "set auth_dbname='p_unconfigured_auth_dbname'"
++
++	curuser=`psql -X -d "dbname=authdb user=someuser password=anypasswd" -tAq -c "select current_user;"`
++	echo "unconfigured database test, curuser=$curuser"
++	test "$curuser" = "" || return 1
++	grep -q "bouncer config error" $BOUNCER_LOG  || return 1
++
++	# test if auth_dbname specified in connection string takes precedence over global setting
++	curuser=`psql -X -d "dbname=pauthz user=someuser password=anypasswd" -tAq -c "select current_user;"`
++	echo "conn string test, curuser=$curuser"
++	test "$curuser" = "someuser" || return 1
++
++	# test if we reject on disabled database.
++	admin "disable authdb"
++	curuser=`psql -X -d "dbname=pauthz user=someuser password=anypasswd" -tAq -c "select current_user;"`
++	echo "disable test curuser=$curuser"
++	test "$curuser" = "" || return 1
++	grep -q "authentication database \"authdb\" is disabled" $BOUNCER_LOG || return 1
++	admin "enable authdb"
++
++	# prepare for the scenario where fallback (*) database can also have auth_dbname set.
++	# additionally, a global "auth_user" is set in this scenario to access authdb.
++	cp test.ini test.ini.bak
++	sed 's/^;\*/*/g' test.ini > test2.ini
++	sed '/^\*/s/$/ auth_dbname = authdb/g' test2.ini > test3.ini
++	echo "auth_user = pswcheck" >> test3.ini
++	mv test3.ini test.ini
++	rm test2.ini
++
++	admin "reload"
++	admin "set auth_type='md5'"
++
++	curuser=`psql -X -d "dbname=postgres user=someuser password=anypasswd" -tAq -c "select current_user;"`
++	echo "default db test, curuser=$curuser"
++	test "$curuser" = "someuser" || return 1
++
++	# revert the changes
++	mv test.ini.bak test.ini
++	admin "reload"
++
++	return 0
++}
++
+ # test plain-text password authentication from PgBouncer to PostgreSQL server
+ #
+ # The PostgreSQL server no longer supports storing plain-text
+@@ -1513,6 +1570,7 @@ test_help
+ test_show
+ test_server_login_retry
+ test_auth_user
++test_auth_dbname
+ test_client_idle_timeout
+ test_server_lifetime
+ test_server_idle_timeout
